@@ -1,0 +1,2220 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+```{r}
+library(readxl)
+library(xlsx)
+library(ggplot2)
+library(stringr)
+library(ggbeeswarm)
+library(dplyr)
+library(ggpmisc)
+library(Hmisc)
+library(gtable)
+library(ftExtra)
+library(flextable)
+library(grid)
+library(cowplot)
+library(svglite)
+library(egg)
+library(ggpubr)
+library(dr4pl)
+library(purrr)
+library(gt)
+library(tidyr)
+library(VCA)
+library(pracma)
+```
+
+```{r}
+set.seed(123) ## to make sure geom_jitter() stays the same each run
+
+rsq <- function(df) { 
+  
+  #https://stackoverflow.com/questions/40901445/function-to-calculate-r2-r-squared-in-r
+  #https://en.wikipedia.org/wiki/Coefficient_of_determination#As_squared_correlation_coefficient
+  
+  obs <- df$data$Response
+  res <- residuals(df)
+  
+  mean_obs <- mean(obs)
+  SSres <- sum(res^2)
+  SStot <- sum((obs-mean_obs)^2)
+  
+  1-(SSres/SStot)
+}
+
+RSV_A_CONV = 0.37
+
+```
+
+# Figure 1: ELISA, linearity, precision
+
+## panel 1A: ELISA
+```{r}
+elisa_df = read_excel('paper_audit.xlsx', sheet = "Validation; ELISA")
+elisa_df = elisa_df %>%
+  group_by(`sample ID`) %>%
+  mutate(ND50 = mean(ND50)) %>%
+  mutate(co_norm = mean(co_norm)) %>%
+  distinct(`sample ID`, ND50, .keep_all = TRUE)
+  
+elisa_df$ND50 = elisa_df$ND50 * RSV_A_CONV
+elisa_df$logND50 = log2(elisa_df$ND50)
+
+e_rubella = elisa_df %>%
+  filter(str_detect(`sample ID`, "^R-"))
+
+e_contrived_new = elisa_df %>%
+  filter(str_detect(`sample ID`, "^lin #"))
+
+#####################################
+########## FITTING FORMULA ##########
+#####################################
+fit = dr4pl(data = e_contrived_new, 
+            dose = ND50, 
+            response = co_norm,
+            method.init = "Mead",
+            trend = "increasing",
+            init.parm = dr4pl_theta(theta_1 = 200, theta_2 = 10000, theta_3 = 0.5, theta_4 = -1, isLog10 = FALSE),
+            upperl = c(1000, 15000, 1.2, 100),
+            lowerl = c(0, -Inf, 0.3, -100)
+            )
+
+fit_rq = rsq(fit)
+
+parameters <- fit$parameters
+pred <- tibble(Dose = 10 ^ seq(0.75, 4.6, 0.01)) %>%
+  mutate(Response = MeanResponse(parameters, Dose))
+
+pred = pred %>%
+  filter(Dose < 6500.0)
+
+
+my_form = function(x) coef(fit)[0] + (coef(fit)[3] - coef(fit[0]))/(1+(x/coef(fit)[1])^coef(fit)[2])
+
+fig_elisa = ggplot(elisa_df, aes(x=ND50, y=co_norm)) + 
+  
+  
+  scale_x_log10(limits = c(1, 10^5),
+                breaks = c(10, 100, 1000, 10000, 100000),
+                labels = scales::trans_format("log10", scales::math_format(10^.x)),) + 
+  
+  scale_y_continuous(limits = c(-10, 70), breaks = c(seq(0, 75, 10))) + 
+
+  
+  geom_line(data = pred, aes(x=Dose, y=Response), 
+            color = 'black', 
+            linetype = "dashed") + 
+  
+  geom_segment(x = -5, xend = 10000, y = 10, yend = 10, color = 'darkgrey') + 
+  
+  
+  
+  geom_point(data = elisa_df, size = 0.9, color = 'white') +
+  geom_point(shape = 1, data = e_rubella, size = 0.9, color = 'blue', stroke = 0.6) +
+  geom_point(shape = 1, data = e_contrived_new, size = 0.9, color = 'black', stroke = 0.6) +
+  annotation_logticks(sides = 'b') + 
+  theme_classic() + 
+  annotate("text", x = 10, y = 65, label="R^2==0.99", parse = TRUE, size = 3) + 
+  xlab('IU/mL estimated by RSV FRNT assay') + 
+  ylab('Absorbance relative to ELISA cutoff control') + 
+  theme(axis.text.x = element_text(size = 8, color = 'black', hjust = 0.4),
+        axis.text.y = element_text(size = 8, color = 'black'),
+        axis.title.x = element_text(size = 8), 
+        axis.title.y = element_text(size = 8),
+        plot.background = element_rect(fill = '#00000000'),
+        panel.background = element_rect(fill = '#00000000'),
+        panel.border = element_blank(),
+        aspect.ratio = 1
+        )
+
+print(summary(fit))
+fig_elisa
+
+# below: paper audit version of curve fit
+```
+
+## panel 1B: linearity
+```{r}
+### panel B - linearity
+
+lin_df = read_excel('paper_audit.xlsx', sheet = "Validation; ELISA") %>%
+  filter(str_detect(`sample ID`, "^lin #")) %>%
+  mutate(ND50 = ND50 * RSV_A_CONV)
+
+formula = y ~ poly(x, 1, raw = TRUE)
+
+myformat <- "y = %sx + %s"
+
+################################
+## get fit stats
+#####################
+# dat <- read.csv("Qualification/Pooled_qual_data.csv")
+dat_l <- read_excel("paper_audit.xlsx", sheet = "Validation; ELISA") %>%
+  mutate(cumm_dil = 1 / dil_factor, sample = `sample ID`)
+
+dat_l_ND50 <- dat_l
+dat_l_ND50$ND50 = dat_l_ND50$ND50 * 0.37
+
+
+AMR_50 <- lm(log10(ND50)~log10(1/cumm_dil),dat_l_ND50)
+AMR_50_sum <- summary(AMR_50)
+
+row_names = c(
+  "r-squared", 
+  "adjusted r-squared", 
+  "residual S.E.", 
+  "f-statistic", 
+  "p-value",
+  "n",
+  "slope",
+  "intercept"
+  )
+
+## table for ND50 lm value
+f_50 = AMR_50_sum$fstatistic
+
+AMR_50_rows = c(
+  round(AMR_50_sum$r.squared, 3),
+  round(AMR_50_sum$adj.r.squared, 3),
+  round(AMR_50_sum$sigma, 2),
+  round(AMR_50_sum$fstatistic[1], 0),
+  pf(f_50[1], f_50[2], f_50[3], lower.tail = FALSE),
+  length(AMR_50$fitted.values),
+  as.double(round(AMR_50$coefficients[2], 0)),
+  round(AMR_50$coefficients[1], 2)
+)
+
+matrix_50 = as.data.frame(cbind(row_names, AMR_50_rows))
+row.names(matrix_50) <- NULL
+colnames(matrix_50) <- c("statistic", "value")
+
+range_df <- dat_l_ND50 %>% 
+  group_by(sample) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE))
+
+sprintf("Linearity: Mean IU/mL results ranging from %.*f to %.*f", 0, min(range_df$ND50), 0, max(range_df$ND50))
+
+fig_linearity = ggplot(data = lin_df, aes(x=dil_factor, y=ND50)) + 
+  
+
+  stat_poly_line(data = lin_df, color = 'black', se = FALSE, size = 0.7, linetype = 'dashed'
+                 ) + 
+  
+  geom_point(data = lin_df, size = 1.5, color = 'black', stroke = NA, fill = 'black', alpha = 0.6) + 
+  
+  stat_poly_eq(data = lin_df, 
+               coef.digits = 3, 
+               coef.keep.zeros = FALSE,
+               color ='black', 
+               size = 3,
+               use_label("eq"),
+               label.x = 0.2,
+               label.y = 0.9) + 
+  
+  scale_y_log10(
+    limits = c(15.5, 10^5),
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", scales::math_format(10^.x)),
+    ) + 
+  
+  scale_x_log10(
+    limits = c(9^-3, 1),
+    breaks = c(10^-3, 10^-2, 10^-1, 10^0),
+    labels = scales::trans_format("log10", scales::math_format(10^.x)),
+                ) + 
+  
+  annotation_logticks(sides = 'lb',
+                      short = unit(0.075, "cm"),
+                      mid = unit(0.15, "cm"),
+                      long = unit(0.2, "cm")) + 
+  theme_classic() + 
+  xlab('Dilution factor') + 
+  ylab("Neutralizing titer (IU/mL)") + 
+  theme(
+    axis.text.x = element_text(size = 8, color = 'black'),
+    axis.text.y = element_text(size = 8, color = 'black'),
+    plot.background = element_rect(fill = '#00000000'),
+    panel.background = element_rect(fill = '#00000000'),
+    panel.border = element_blank(),
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8),
+    aspect.ratio = 1)
+  
+print(fit)
+fig_linearity
+```
+
+## panel 1C: precision - linearity panel 
+```{r}
+cv_calc <- function(x) {
+  data.frame(
+    y = mean(x),
+    ymin = mean(x) - 2 * sd(x),
+    ymax = mean(x) + 2 * sd(x)
+  )
+}
+
+test_calc <- function(x) {
+  data.frame(
+    y = 2^mean(log2(x)),
+    ymin = 2^(mean(log2(x)) - 2 * log2(1.43)),
+    ymax = 2^(mean(log2(x)) + 2 * log2(1.43))
+  )
+}
+
+lprec_df = read_excel("paper_audit.xlsx", sheet = "Validation; Precision contrived")
+lprec_df$ND50 = lprec_df$ND50 * RSV_A_CONV
+lprec_df = lprec_df %>% mutate(
+  tick = case_when(
+    `sample ID` == "lin #2" ~ 2,
+    `sample ID` == "lin #3" ~ 3,
+    `sample ID` == "lin #4" ~ 4,
+    `sample ID` == "lin #5" ~ 5
+  )
+)
+
+
+lprec_df$logND50 = log2(lprec_df$ND50)
+
+lprec_df = lprec_df %>%
+  filter(plateID !="2023-Apr-25_plate5")
+
+temp <- lprec_df %>%
+  group_by(`sample ID`) %>%
+  summarise(
+    y = 2^mean(log2(ND50)),
+    ymin = 2^(mean(log2(ND50)) - 2 * log2(1.43)),
+    ymax = 2^(mean(log2(ND50)) + 2 * log2(1.43)),
+    tick = mean(tick)
+  )
+
+sprintf("Expected IU/mL values ranging from %.*f to %.*f", 0, min(lprec_df$theoND50), 0, max(lprec_df$theoND50))
+
+l_prec = ggplot(lprec_df, aes(x = tick, y = ND50, group = tick)) +
+  
+  annotate(
+    geom = "rect",
+    xmin = temp$tick-0.3,
+    xmax = temp$tick+0.3,
+    ymax = temp$ymax,
+    ymin = temp$ymin,
+    alpha = 0.3,
+    fill = 'green'
+  ) +
+  
+  annotate(
+    geom = "segment", 
+    x = temp$tick - 0.3,
+    xend =temp$tick + 0.3,
+    y = temp$y,
+    yend = temp$y,
+    linetype = 'solid',
+    size = 0.15
+  ) + 
+  
+  geom_jitter(size = 1.5, alpha = 0.6, color = 'black', stroke = NA,
+             width = 0.1, 
+             height = 0) + 
+  
+  scale_x_continuous(labels = c("2", "3", "4", "5"),
+                     breaks = c(2, 3, 4, 5)) +
+  
+  scale_y_log10(
+    labels = scales::trans_format("log10", scales::math_format(10^.x)),
+    breaks = c(1, 10, 100, 1000, 10000, 10000),
+    limits = c(1, 11^4),
+    expand = c(0,0)
+  ) +
+  theme_classic() +
+  xlab('Panel member') + 
+  ylab('Measured IU/mL') + 
+  annotation_logticks(sides = 'l') + 
+  theme(
+    axis.text.x = element_text(size = 8, color = 'black'),
+    axis.text.y = element_text(size = 8, color = 'black'),
+    axis.title.x = element_text(size = 8), 
+    axis.title.y = element_text(size = 8),
+    plot.background = element_rect(fill = '#00000000'),
+    panel.background = element_rect(fill = '#00000000'),
+    panel.border = element_blank(),
+    aspect.ratio = 1
+)
+
+l_prec
+```
+
+## panel 1D: precision - rubella panel 
+```{r}
+cv_calc <- function(x) {
+  data.frame(
+    y = mean(x),
+    ymin = mean(x) - 2 * sd(x),
+    ymax = mean(x) + 2 * sd(x)
+  )
+}
+
+test_calc <- function(x) {
+  data.frame(
+    y = 2^mean(log2(x)),
+    ymin = 2^(mean(log2(x)) - 2 * log2(1.43)),
+    ymax = 2^(mean(log2(x)) + 2 * log2(1.43))
+  )
+}
+
+rprec_df = read_excel("paper_audit.xlsx", sheet = "Validation; Precision rubella") %>%
+  mutate(ND50 = ND50 * RSV_A_CONV) %>%
+  mutate(
+    tick = case_when(
+      `sample ID` == "R-02" ~ 1,
+      `sample ID` == "R-01" ~ 2,
+      `sample ID` == "R-08" ~ 3,
+      `sample ID` == "R-12" ~ 4,
+      `sample ID` == "R-14" ~ 5
+    )
+  )
+
+
+rprec_df$logND50 = log2(rprec_df$ND50)
+
+rprec_df = rprec_df %>%
+  filter(plateID !="2023-Apr-25_plate5")
+
+
+
+temp <- rprec_df %>%
+  group_by(`sample ID`) %>%
+  summarise(
+    y = 2^mean(log2(ND50)),
+    ymin = 2^(mean(log2(ND50)) - 2 * log2(1.43)),
+    ymax = 2^(mean(log2(ND50)) + 2 * log2(1.43)),
+    tick = mean(tick)
+  )
+
+r_prec = ggplot(rprec_df, aes(x = tick, y = ND50, group = tick)) +
+  
+  annotate(
+    geom = "rect",
+    xmin = temp$tick-0.3,
+    xmax = temp$tick+0.3,
+    ymax = temp$ymax,
+    ymin = temp$ymin,
+    alpha = 0.3,
+    fill = 'green'
+  ) +
+  
+  annotate(
+    geom = "segment", 
+    x = temp$tick - 0.3,
+    xend =temp$tick + 0.3,
+    y = temp$y,
+    yend = temp$y,
+    linetype = 'solid',
+    size = 0.15
+  ) + 
+  
+  geom_jitter(size = 1.5, alpha = 0.6, color = 'black', stroke = NA,
+              width = 0.09,
+              height = 0,
+  ) + 
+
+  scale_x_continuous(
+    breaks = c(1, 2, 3, 4, 5),
+    labels = c("R-02", "R-01", "R-08", "R-12", "R-14")
+  ) + 
+
+  scale_y_log10(
+    breaks = c(1, 10, 100, 1000, 10000, 10000),
+    labels = scales::trans_format("log10", scales::math_format(10^.x)),
+    limits = c(1.55, 10^4)
+  ) +
+  
+  
+  theme_classic() +
+  xlab('Panel member') + 
+  ylab('Measured IU/mL') + 
+  annotation_logticks(sides = 'l') + 
+  
+  theme(
+    axis.text.x = element_text(size = 8, color = 'black'),
+    axis.text.y = element_text(size = 8, color = 'black'),
+    axis.title.x = element_text(size = 8), 
+    axis.title.y = element_text(size = 8),
+    plot.background = element_rect(fill = '#00000000'),
+    panel.background = element_rect(fill = '#00000000'),
+    panel.border = element_blank(),
+    aspect.ratio = 1
+  )
+
+r_prec
+```
+
+## now combine panels into fig1 
+```{r} 
+valid_panel = plot_grid(fig_elisa, fig_linearity, l_prec, r_prec, labels = c('A', 'B', 'C', 'D'), axis = 'tblr', align = 'hv')
+valid_panel
+ggsave("paper_audit_figs/fig1.svg", valid_panel, dpi = 600, width = 5.5, height = 6)
+```
+
+```{r}
+geo_mean <- function(x) {
+  return (exp(mean(log(x))))
+}
+```
+
+# Figure 2
+
+```{r}
+library(timetk)
+
+df = read_excel("paper_audit.xlsx", sheet = "Results") %>%
+  filter(!is.na(sample_type2))
+
+df$ND50 = df$ND50 * RSV_A_CONV
+
+timepoints = df %>%
+  filter(sample_type == 'timepoint')
+
+tp1 = timepoints %>%
+  filter(CollDate < '2022/09/1')
+
+tp2 = timepoints %>%
+  filter_by_time(CollDate, '2022/07/01', '2023/02/01')
+
+tp3 = timepoints %>%
+  filter_by_time(CollDate, '2023/02/01', '2023/07/01')
+
+tp4 = timepoints %>%
+  filter(CollDate > '2023/07/01')
+
+
+#### CREATE DATAFRAME FOR COMPARISON 
+
+tp1$tp = 'timepoint 1'
+tp2$tp = 'timepoint 2'
+tp3$tp = 'timepoint 3'
+tp4$tp = 'timepoint 4'
+
+tp_comp = rbind(tp1, tp2, tp3, tp4)
+
+my_groups = combn(unique(tp_comp$tp), 2)
+
+
+
+lims <- as.POSIXct(strptime(c("2021-11-01 00:00", "2023-11-01 00:00"), 
+                            format = "%Y-%m-%d %H:%M"))
+
+fig2 = ggplot(timepoints, aes(x=CollDate, y=ND50)) + 
+  geom_jitter(width = 19^5, size = 2, alpha = 0.54, stroke = 0.5) + 
+  scale_y_log10(limits = c(15.5, 100000),
+                breaks = c(10, 100, 1000, 10000, 100000),
+                labels = scales::trans_format("log10", scales::math_format(10^.x)),) + 
+  scale_x_datetime(date_breaks = ('1 month'), limits = lims) + 
+  annotation_logticks(sides = 'l') + 
+  
+  #### geo_mean LINES 
+  geom_segment(aes(x = as.POSIXct("2022-01-01"), xend = as.POSIXct("2022-04-01"), y = geo_mean(tp1$ND50), yend = geo_mean(tp1$ND50)), 
+               linewidth = 0.5, 
+               color = 'black') + 
+  geom_segment(aes(x = as.POSIXct("2022-06-15"), xend = as.POSIXct("2022-09-15"), y = geo_mean(tp2$ND50), yend = geo_mean(tp2$ND50)), 
+               linewidth = 0.5, 
+               color = 'black') + 
+  geom_segment(aes(x = as.POSIXct("2023-01-01"), xend = as.POSIXct("2023-03-20"), y = geo_mean(tp3$ND50), yend = geo_mean(tp3$ND50)), 
+               linewidth = 0.5, 
+               color = 'black') + 
+  geom_segment(aes(x = as.POSIXct("2023-07-15"), xend = as.POSIXct("2023-10-15"), y = geo_mean(tp4$ND50), yend = geo_mean(tp4$ND50)), 
+               linewidth = 0.5, 
+               color = 'black') + 
+  
+  #### MEDIAN LINES 
+  geom_segment(aes(x = as.POSIXct("2022-01-01"), xend = as.POSIXct("2022-04-01"), y = median(tp1$ND50), yend = median(tp1$ND50)), 
+               linewidth = 0.5, 
+               color = 'black',
+               linetype = 'dashed') + 
+  geom_segment(aes(x = as.POSIXct("2022-06-15"), xend = as.POSIXct("2022-09-15"), y = median(tp2$ND50), yend = median(tp2$ND50)), 
+               linewidth = 0.5, 
+               color = 'black',
+               linetype = 'dashed') + 
+  geom_segment(aes(x = as.POSIXct("2023-01-01"), xend = as.POSIXct("2023-03-20"), y = median(tp3$ND50), yend = median(tp3$ND50)), 
+               linewidth = 0.5, 
+               color = 'black',
+               linetype = 'dashed') + 
+  geom_segment(aes(x = as.POSIXct("2023-07-15"), xend = as.POSIXct("2023-10-15"), y = median(tp4$ND50), yend = median(tp4$ND50)), 
+               linewidth = 0.5, 
+               color = 'black',
+               linetype = 'dashed') + 
+  
+  theme_classic() + 
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 8, color = 'black'),
+        axis.title.y = element_text(size = 9), 
+        axis.title.x = element_blank(), 
+        plot.background = element_rect(fill = '#00000000'),
+        panel.background = element_rect(fill = '#00000000'),
+        panel.border = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = 'none') + 
+  ylab("Neutralizing titer (IU/mL)")
+
+fig2
+
+
+tests <- read_excel('paper_data/PCR_tests.xlsx')
+colnames(tests) <- c('RepWeekDate', 'AntigenDetections')
+tests$RepWeekDate <- as.Date(tests$RepWeekDate)
+
+
+### MAKE FIGURE
+fig1_overlay <- (ggplot(tests, aes(RepWeekDate, AntigenDetections, 
+                        color=AntigenDetections)) + geom_line(linewidth=1.0, linetype="solid") + 
+           scale_color_gradient(low="mediumseagreen", high="mediumseagreen")
+) + 
+  scale_y_continuous(position="left", limits=c(0, 800), 
+                     breaks = c(0, 200, 400, 600, 800)) +
+  
+  coord_cartesian(xlim = as.Date(c('2021-11-01', '2023-11-01')), clip = 'on') + 
+  
+  theme(
+    panel.background = element_rect(fill='transparent'),
+    plot.background = element_rect(fill='transparent', color='transparent'),
+    axis.text.x = element_text(size=7, angle=315, hjust=0, color = 'black'), 
+    axis.text.y = element_text(size=8, color = 'black'),
+    axis.title.y = element_text(size = 8, color = 'black'),
+    axis.title.x = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.background = element_blank(),
+    legend.box.background = element_blank(),
+    legend.text = element_blank(),
+    panel.border = element_blank(),
+    legend.position = "none",
+    axis.line = element_line(color='black', linewidth=0.4),
+    axis.ticks = element_line(color='black', linewidth=0.25) 
+  ) + 
+  guides(color=guide_legend(override.aes = list(color=NA))) + 
+  
+  scale_x_date(date_breaks=('1 month'), 
+               # limits=as.Date(c('2021-11-01', '2023-11-01')),
+               date_labels = "%b") + 
+  ylab("# positive tests") 
+
+
+fig1_overlay
+
+fig2_total = ggarrange(fig2, fig1_overlay, 
+                       nrow = 2, 
+                       ncol = 1, 
+                       heights = c(0.8, 0.2)
+                       # align = "h"
+                       )
+
+fig2_total
+ggsave("paper_audit_figs/fig2.svg", fig2_total, height = 5, width = 4.5, dpi = 600)
+fig2_total
+
+```
+
+## Figure 3: clinical specimen groups:
+
+```{r}
+df = read_excel("paper_audit.xlsx", sheet = "Results") %>%
+  filter(!is.na(sample_type2))
+
+
+df$ND50 = df$ND50 * 0.37
+df$logND50 = log2(df$ND50)
+
+df$s2wrapped = str_wrap(df$sample_type2, width = 10, whitespace_only = TRUE)
+
+my_groups = combn(unique(df$s2wrapped), 2)
+
+compare = data.frame(
+  df$s2wrapped,
+  df$logND50
+)
+
+level_order = c("population",
+                "future\nRSV-infected",
+                "RSV+,\nimmunocompetent",
+                "RSV+,\nimmunosuppressed",
+                "Influenza+,\nRSV-"
+                                 )
+
+ic07 = df %>%
+  filter(s2wrapped == "RSV+,\nimmunocompetent" & coll_period == '0-7' )
+
+ic715 = df %>%
+  filter(s2wrapped == "RSV+,\nimmunocompetent" & coll_period == '7-15' )
+
+ic15 = df %>%
+  filter(s2wrapped == "RSV+,\nimmunocompetent" & coll_period == '15+' )
+
+
+fig3 = ggplot(df, aes(x=factor(s2wrapped,level = level_order), y=ND50 )) + 
+  coord_cartesian(clip = 'off', ylim = c(19, 1*10^7)) + 
+  theme_classic() + 
+  geom_violin(alpha = 0.3, aes(fill = s2wrapped), color = "#00000000") +
+  geom_beeswarm(size = 1, alpha = 0.8, cex = 1) +
+  scale_y_log10(
+                     breaks = c(10, 100, 1000, 10000, 100000),
+                     labels = scales::trans_format("log10", scales::math_format(10^.x)),
+                     limits = c(9, 10^6)
+                ) +
+  
+  scale_x_discrete(labels = c("HSV serology\nremnant specimens\n(no PCR result)", 
+                              "Future RSV PCR+\n(>10 days)", 
+                              "RSV PCR+\nimmunocompetent\n(-7 - 98 days)", 
+                              "RSV PCR+\nimmunosuppressed\n(-7 - 49 days)", 
+                              "Influenza PCR+\nRSV PCR-\n(-7 - 39 days)")) + 
+  
+  annotation_logticks(sides = 'l') +
+  
+  geom_signif(
+    comparisons = list(
+    # my_groups[,1],
+    my_groups[,8],
+    my_groups[,2],
+    # my_groups[,3],
+    my_groups[,4],
+    my_groups[,5],
+    # my_groups[,6],
+    # my_groups[,7],
+    my_groups[,9]
+    # my_groups[,10]
+  ),
+  test = "t.test",
+  map_signif_level = TRUE,
+  step_increase = 0.07,
+  vjust = 0.8) +
+  ylab("Neutralizing titer (IU/mL") + 
+
+  theme(
+    axis.text.x = element_text(size = 8, color = 'black'), 
+    axis.text.y = element_text(size = 10, color = 'black'), 
+    axis.title.y = element_text(size = 10, color = 'black'),
+    axis.title.x = element_blank(),
+    plot.background = element_rect(fill = '#00000000'),
+    panel.background = element_rect(fill = '#00000000'),
+    panel.border = element_blank(),
+    legend.position = "none" 
+  ) + 
+  
+## MEAN LINES
+geom_segment(aes(x=0.6,
+                 xend = 1.4,
+                 y = geo_mean(subset(df, sample_type2 == 'population')$ND50),
+                 yend = geo_mean(subset(df, sample_type2 == 'population')$ND50)),
+             linewidth = 0.5,
+             color = 'black') +
+
+geom_segment(aes(x=4.6,
+             xend = 5.4,
+             y = geo_mean(subset(df, sample_type2 == 'Influenza+, RSV-')$ND50),
+             yend = geo_mean(subset(df, sample_type2 == 'Influenza+, RSV-')$ND50)),
+             linewidth = 0.5,
+             color = 'black') +
+geom_segment(aes(x=2.6,
+                 xend = 3.4,
+                 y = geo_mean(subset(df, sample_type2 == 'RSV+, immunocompetent')$ND50),
+                 yend = geo_mean(subset(df, sample_type2 == 'RSV+, immunocompetent')$ND50)),
+             linewidth = 0.5,
+             color = 'black') +
+
+geom_segment(aes(x=3.6,
+                 xend = 4.4,
+                 y = geo_mean(subset(df, sample_type2 == 'RSV+, immunosuppressed')$ND50),
+                 yend = geo_mean(subset(df, sample_type2 == 'RSV+, immunosuppressed')$ND50)),
+             linewidth = 0.5,
+             color = 'black') +
+
+geom_segment(aes(x=1.6,
+                 xend = 2.4,
+                 y = geo_mean(subset(df, sample_type2 == 'future RSV-infected')$ND50),
+                 yend = geo_mean(subset(df, sample_type2 == 'future RSV-infected')$ND50)),
+             linewidth = 0.5,
+             color = 'black')
+
+#           
+fig3
+ggsave("paper_audit_figs/fig3.svg", dpi = 600, width = 6, height = 5.2, unit = "in")
+```
+## Figure S1: neut titer and RSV infection time delta
+```{r}
+library(ggplot2)
+library(readxl)
+library(waterfalls)
+library(tidyverse)
+library(gridExtra)
+library(ggpmisc)
+library(scales)
+library(dplyr)
+library(gtable)
+library(grid)
+library(ggpattern)
+library(gtable)
+library(ggpubr)
+library(svglite)
+library(cowplot)
+library(egg)
+
+# df$ND50 = df$ND50 * 0.37
+
+df = df %>% replace_na(list(performing_lab_locs = "HSV serology"))
+df$hos_mask = df$performing_lab_locs
+
+df_fil = df %>%
+  filter(sample_type %in% c('recently_positive', 'flu', 'longitudinal', 'nan'))
+
+df_fil = df_fil %>%
+  filter(sample_type2 != 'HSV serology remnant specimens')
+
+flu = df_fil %>%
+  filter(sample_type2 == "Influenza+, RSV-"  )
+
+rp_icompetent = df_fil %>%
+  filter(sample_type2 == "RSV+, immunocompetent")
+
+rp_isuppresssed = df_fil %>%
+  filter(sample_type2 == "RSV+, immunosuppressed")
+
+future_pos = df_fil %>%
+  filter(sample_type2 == "future RSV-infected")
+
+coords = coord_cartesian(clip = 'off', xlim = c(1, 100000)) 
+age_overlay = geom_point(aes(x = 0.1, fill = `age_group`, , color = `age_group`, shape = hos_mask), size=1.3)
+age_overlay_oof = geom_point(aes(x = 0.1, fill = `age_group`, , color = `age_group`), size=1.3)
+
+age_overlay_altered = geom_point(aes(x = 0.1, shape= hos_mask), size=1.3) 
+age_overlay_fp = geom_point(aes(x = 0.1, color = `age_group`), size=1.3) 
+age_overlay_hos = geom_point(aes(x = 0.1, shape = hos_mask), size = 1.3)
+
+hos_scale = scale_shape_manual(
+  name = '',
+  values = c('Hospital A'=24, 'Hospital B'=22, 'Hospital C'=23, 'HSV serology' = 25 )
+) 
+
+age_scale_fill = scale_fill_manual(
+  name = '',
+  values = c('65+'='darkslategray', 
+             '18-65'='darkolivegreen4', 
+             '18 and below'='darkseagreen1', 
+             'Unknown'='dimgrey'),
+  labels = c('18 years and below', '18-65 years', '65+ years', 'unknown') 
+)
+
+age_scale_color = scale_color_manual(
+  name = '',
+  values = c('65+'='darkslategray', 
+             '18-65'='darkolivegreen4', 
+             '18 and below'='darkseagreen1', 
+             'Unknown'='dimgrey'),
+  labels = c('18 years and below', '18-65 years', '65+ years', 'unknown') 
+)
+
+level_order = c('future RSV-infected', 'RSV+, immunocompetent', 'RSV+, immunosuppressed', 'Influenza+, RSV-')
+### COLOR LEGEND
+color_plot = ggplot(df_fil, aes(x=ND50, y = reorder(dummy, ND50), fill = factor(sample_type2, level = level_order))) +
+  geom_col() + 
+  theme_classic() + 
+  scale_y_discrete(position = 'left') +
+  scale_x_log10(
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", scales::math_format(10^.x)),
+    # limits = c(1, 100000)
+  ) +
+  scale_fill_manual(name = "",
+    values = c(
+      "future RSV-infected" = "mediumpurple",
+      "RSV+, immunocompetent"="brown", 
+      "RSV+, immunosuppressed"="coral",
+      "Influenza+, RSV-" = "blue"
+      
+    ),
+    
+    labels = c(
+                        "Future RSV PCR+\n(>10 days)", 
+                        "RSV PCR+\nimmunocompetent\n(-7 - 98 days)", 
+                        "RSV PCR+\nimmunosuppressed\n(-7 - 49 days)", 
+                        "Influenza PCR+\nRSV PCR-\n(-7 - 39 days)")
+  ) + 
+  annotation_logticks(sides='b') +
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_text(size=6),
+        axis.text.x = element_text(size=8, color = 'black'),
+        axis.title.x = element_blank(),
+        legend.position = "right",
+        # legend.direction = "horizontal",
+        legend.title = element_blank(),
+        legend.text = element_text(size = 6),
+
+  ) + 
+ guides(fill = guide_legend(ncol = 4, nrow = 1))
+
+
+color_plot 
+
+color_legend = cowplot::get_legend(color_plot)
+
+color_legend
+
+age_plot = ggplot(df_fil, aes(x=ND50, y = reorder(dummy, ND50))) +
+  coords + 
+  age_overlay_oof +
+  age_scale_fill + 
+  age_scale_color+ 
+  geom_col() + 
+  theme_classic() + 
+  scale_y_discrete(position = 'left') +
+  scale_x_log10(
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", scales::math_format(10^.x))
+  ) +
+
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_text(size=6),
+        axis.text.x = element_text(size=8, color = 'black'),
+        axis.title.x = element_blank(),
+        legend.position = "right",
+        legend.title = element_blank(),
+        legend.text = element_text(size = 6, color = "black"),
+
+  ) + 
+  guides( fill = guide_legend(nrow =1, ncol =4 ), label.hjust = -0.4)
+
+age_plot
+
+age_legend = cowplot::get_legend(age_plot)
+
+
+##### GET LEGEND FOR HOSPITALS
+hos_plot = ggplot(df_fil, aes(x=ND50, y = reorder(dummy, ND50))) +
+  coords + 
+  age_overlay_hos +
+  hos_scale + 
+  geom_col() + 
+  theme_classic() + 
+  scale_y_discrete(position = 'left') +
+  scale_x_log10(
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", scales::math_format(10^.x))
+  ) +
+  
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_text(size=6),
+        axis.text.x = element_text(size=8, color = 'black'),
+        axis.title.x = element_blank(),
+        legend.position = "right",
+        legend.title = element_blank(),
+        legend.text = element_text(size = 6),
+        
+  ) + 
+  guides( shape = guide_legend(nrow =1, ncol =4 ), label.hjust = -0.4)
+
+
+hos_plot
+
+hos_legend = cowplot::get_legend(hos_plot)
+
+hos_legend
+
+### CUBE ROOT TRANSFORM 
+cube_root <- function(x) sign(x) * abs(x) ^ (1/3)
+cube <- function(x) x ^ 3
+library(scales)
+trans_cube = trans_new(name = "cube root", 
+                       transform = cube_root, 
+                       inverse = cube)
+
+##### FLU timedelta
+flu_dt = ggplot(flu, aes(x=collected_days_since_pos, y = `sample ID`)) +
+  geom_col(fill = 'blue') +
+  theme_classic() + 
+  scale_y_discrete(position='right') + 
+  scale_x_continuous(
+    trans = trans_cube,
+    breaks = c(-500, -120, -30, -5, 0, 5, 30, 120),
+    limits = c(-500, 120)
+  ) + 
+  theme_classic() +
+  theme(axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size=8, angle = 0, color = 'black'),
+        legend.position="right",
+        legend.text = element_text(size=6), legend.spacing = unit(0.1, 'points'),
+        plot.background = element_rect(fill = '#00000000'),
+        panel.background = element_rect(fill = '#00000000'),
+        panel.border = element_blank(),
+        
+
+  )
+
+flu_dt
+
+### recently positive immunocompetent
+rp_icompetent_dt = ggplot(rp_icompetent, aes(x=collected_days_since_pos, y = reorder(dummy, ND50))) +
+  geom_col(fill = 'brown') +
+  theme_classic() + 
+  scale_y_discrete(position='right') + 
+  scale_x_continuous(
+    trans = trans_cube,
+    limits = c(-500, 120),
+    breaks = c(-500, -120, -30, -5, 0, 5, 30, 120)
+  ) + 
+  theme_classic() +
+  theme(axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size=8, angle = 0, color = 'black'),
+        legend.position="right",
+        legend.text = element_text(size=6), legend.spacing = unit(0.1, 'points'),
+        plot.background = element_rect(fill = '#00000000'),
+        panel.background = element_rect(fill = '#00000000'),
+        panel.border = element_blank(),
+
+  )
+
+rp_icompetent_dt
+
+### recently positive immmunosuppressed timedelta
+rp_isuppressed_dt = ggplot(rp_isuppresssed, aes(x=collected_days_since_pos, y = reorder(dummy, ND50))) +
+  geom_col(fill = 'coral') +
+  theme_classic() + 
+  scale_y_discrete(position='right') + 
+  scale_x_continuous(
+    trans = trans_cube,
+    limits = c(-500, 120),
+    breaks = c(-500, -120, -30, -5, 0, 5, 30, 120)
+  ) + 
+  theme_classic() +
+  theme(axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size=8, angle = 0, color = 'black'),
+        legend.position="right",
+        legend.text = element_text(size=6), legend.spacing = unit(0.1, 'points'),
+        plot.background = element_rect(fill = '#00000000'),
+        panel.background = element_rect(fill = '#00000000'),
+        panel.border = element_blank(),
+
+  )
+
+rp_isuppressed_dt
+
+### future-infected timedelta 
+
+future_pos_dt = ggplot(future_pos, aes(x=collected_days_since_pos, y = reorder(dummy, ND50))) +
+  geom_col(fill = 'mediumpurple') +
+  theme_classic() + 
+  scale_y_discrete(position='right') + 
+  scale_x_continuous(
+    trans = trans_cube,
+    breaks = c(-500, -120, -30, -5, 0, 5, 30, 120),
+    limits = c(-500, 120)
+  ) + 
+  theme_classic() +
+  theme(axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.title.x = element_text(size = 10),
+        axis.text.x = element_text(size=8, angle = 0, color = 'black'),
+        legend.position="right",
+        legend.text = element_text(size=6), legend.spacing = unit(0.1, 'points'),
+        plot.background = element_rect(fill = '#00000000'),
+        panel.background = element_rect(fill = '#00000000'),
+        panel.border = element_blank(),
+
+  ) + 
+  xlab("Serum draw date - PCR date")
+
+future_pos_dt
+
+### flu titer 
+
+flu_titer = ggplot(flu, aes(x=ND50, y = reorder(dummy, ND50))) +
+  coords + 
+  age_overlay + 
+  age_scale_color +
+  age_scale_fill + 
+  hos_scale + 
+  geom_col(fill='blue') + 
+  theme_classic() + 
+  scale_y_discrete(position = 'left') +
+  scale_x_log10(
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", scales::math_format(10^.x))
+  ) +
+  annotation_logticks(sides='b') +
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_text(size=6),
+        axis.text.x = element_text(size=8, color = 'black'),
+        axis.title.x = element_blank(),
+        plot.background = element_rect(fill = '#00000000'),
+        panel.background = element_rect(fill = '#00000000'),
+        panel.border = element_blank(),
+        legend.position = "none",
+
+  )    
+
+flu_titer
+
+rp_icompetent_titer = ggplot(rp_icompetent, aes(x=ND50, y = reorder(dummy, ND50))) +
+  coords + 
+  geom_col(fill = 'brown') + 
+  age_overlay + 
+  age_scale_color +
+  age_scale_fill + 
+  hos_scale + 
+  theme_classic() + 
+  scale_y_discrete(position = 'left') +
+  scale_x_log10(
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", scales::math_format(10^.x))
+  ) +
+  annotation_logticks(sides='b') +
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_text(size=6),
+        axis.text.x = element_text(size=8, color = 'black'),
+        axis.title.x = element_blank(),
+        plot.background = element_rect(fill = '#00000000'),
+        panel.background = element_rect(fill = '#00000000'),
+        panel.border = element_blank(),
+        legend.position = "none",
+
+  )  
+
+rp_icompetent_titer
+  
+rp_isuppresssed_titer = ggplot(rp_isuppresssed, aes(x=ND50, y = reorder(dummy, ND50))) +
+  coords + 
+  age_overlay + 
+  age_scale_fill +
+  age_scale_color + 
+  hos_scale + 
+  geom_col(fill = 'coral') + 
+  theme_classic() + 
+  scale_y_discrete(position = 'left') +
+  scale_x_log10(
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", scales::math_format(10^.x)),
+    # limits = c(1, 100000)
+  ) +
+  annotation_logticks(sides='b') +
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_text(size=6),
+        axis.text.x = element_text(size=8, color = 'black'),
+        axis.title.x = element_blank(),
+        plot.background = element_rect(fill = '#00000000'),
+        panel.background = element_rect(fill = '#00000000'),
+        panel.border = element_blank(),
+        legend.position = "none",
+
+  )  
+
+rp_isuppresssed_titer
+
+future_pos_titer = ggplot(future_pos, aes(x=ND50, y = reorder(dummy, ND50))) +
+  coords + 
+  age_overlay + 
+  age_scale_fill +
+  age_scale_color + 
+  hos_scale + 
+  geom_col(fill = 'mediumpurple') + 
+  theme_classic() + 
+  scale_y_discrete(position = 'left') +
+  scale_x_log10(
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", scales::math_format(10^.x)),
+    # limits = c(1, 100000)
+  ) +
+  annotation_logticks(sides='b') +
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_text(size=6),
+        axis.text.x = element_text(size=8, color = 'black'),
+        axis.title.x = element_text(size = 10),
+        plot.background = element_rect(fill = '#00000000'),
+        panel.background = element_rect(fill = '#00000000'),
+        panel.border = element_blank(),
+        legend.position = "none"
+
+  ) +
+  xlab("Neutralizing titer (IU/ml)")
+
+future_pos_titer
+
+
+age_legend = ggdraw(age_legend) +
+  theme(
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    plot.background = element_rect(fill = "transparent", color = NA)
+  ) 
+        
+
+hos_legend = ggdraw(hos_legend) + 
+  theme(
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    plot.background = element_rect(fill = "transparent", color = NA)
+  )
+
+color_legend = ggdraw(color_legend) + 
+  theme(
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    plot.background = element_rect(fill = "transparent", color = NA)
+  )
+
+alt_grid = ggarrange(
+
+                     flu_dt,
+                     flu_titer,
+                     rp_icompetent_dt,
+                     rp_icompetent_titer,
+                     rp_isuppressed_dt,
+                     rp_isuppresssed_titer,
+                     future_pos_dt,
+                     future_pos_titer,
+                     nrow = 4,
+                     ncol = 2,
+                     heights = c(0.7, 1.3, 0.7, 1.3)
+                     # align = 'hv'
+)
+
+
+alt_grid
+
+legends = egg::ggarrange(color_legend, 
+                    age_legend,
+                    hos_legend,
+                    nrow = 3, ncol = 1,
+                    
+                    heights = c(1, 1, 1),
+                    padding = unit(2, "mm"))
+
+
+ggsave("figs2_legends.svg", legends, dpi = 1000)
+
+full_grid = cowplot::plot_grid(alt_grid, 
+                      legends,
+                     nrow = 2,
+                     ncol = 1,
+                     rel_heights = c(1.80, 0.2))
+full_grid
+
+ggsave(filename = 'paper_audit_figs/figS1.svg',
+       plot = full_grid,
+       dpi = 1000,
+       width = 5.6,
+       height = 8.2,
+       bg = "transparent"
+       )
+
+
+```
+
+```{r}
+
+geo_mean <- function(x) {
+  return (exp(mean(log(x))))
+}
+
+geomSD <- function(x) {
+  sd_log_x <- exp(sd(log(x)))
+  
+  return(sd_log_x)
+}
+
+calculate_GCV <- function(sd_log_data) {
+  # Calculate GCV from standard deviation of log-transformed data, used for anovaVCA output
+  gcv <- sqrt(exp(sd_log_data^2) - 1) * 100
+  
+  # Return the result
+  return(gcv)
+}
+
+```
+
+```{r}
+calculate_variance_components <- function(anova_tab, measurement_df, measurement_col, sample_id_col) {
+  lapply(names(anova_tab), function(sample_id) {
+    print(sample_id)
+    vca_obj <- anova_tab[[sample_id]]
+    print(vca_obj)
+    tab = as.data.frame(vca_obj[["aov.tab"]])
+    
+    br_v = (tab[["MS"]][2] - tab[["MS"]][3]) / 2
+    wr_v = tab[["MS"]][3]
+    tot_v = br_v + wr_v
+    
+    br_sd = sqrt(br_v)
+    wr_sd = sqrt(wr_v)
+    tot_sd = sqrt(tot_v)
+    
+    br_cv = calculate_GCV(br_sd)
+    wr_cv = calculate_GCV(wr_sd)
+    tot_cv = calculate_GCV(tot_sd)
+    
+    gmeans = measurement_df %>%
+      group_by(!!sym(sample_id_col)) %>%
+      reframe(!!sym(sample_id_col) := !!sym(sample_id_col), 
+              geo_mean = geo_mean(!!sym(measurement_col))) %>%
+      distinct()
+    
+    result = data.frame(
+      measurement = measurement_col,
+      panel_member = sample_id,
+      intraassay_GSD = wr_sd,
+      intraassay_GCV = wr_cv,
+      interassay_GSD = br_sd,
+      interassay_GCV = br_cv,
+      total_GSD = tot_sd,
+      total_GCV = tot_cv
+    )
+    
+    print(result)
+    
+    left_join(result, gmeans, by = sample_id_col)
+  }) %>% bind_rows()
+}
+```
+
+# table S1
+```{r}
+
+a_conv_df = read_excel("paper_audit.xlsx", sheet = "RSV A conversion factor data") %>%
+  mutate(virus = "RSV A2") %>%
+  pivot_longer(
+    cols = c(ND50, ND80), 
+    names_to = "measurement",
+    values_to = "titer") %>%
+  mutate(log_titer = log(titer)) %>%
+  mutate(day = case_when(
+    str_detect(plateID, "May-15") ~ 1,
+    str_detect(plateID, "May-16") ~ 2, 
+    str_detect(plateID, "May-22") ~ 3,
+    str_detect(plateID, "May-23") ~ 4
+  )) %>%
+  group_by(measurement) %>%
+  mutate(panel_member = `sample ID`, virus = virus, measurement = measurement, geomean = geo_mean(titer), conversion_factor = 2000 / geomean) %>% 
+    distinct()
+
+a_conv_50 = anovaVCA(log_titer ~ day,
+                     Data = as.data.frame(a_conv_df %>% filter(measurement == "ND50")),
+                     by = "sample ID",
+                     NegVC = TRUE)
+
+b_conv_df = read_excel("paper_audit.xlsx", sheet = "Validation; RSV B") %>%
+  filter(`sample ID` == "NIBSC 16.284") %>%
+  mutate(virus = "RSV B WV/14617") %>%
+  pivot_longer(
+    cols = c(ND50, ND80), 
+    names_to = "measurement",
+    values_to = "titer") %>%
+  mutate(log_titer = log(titer)) %>%
+  mutate(day = case_when(
+    str_detect(plateID, "Nov-27") ~ 1,
+    str_detect(plateID, "Dec_4") ~ 2, 
+    str_detect(plateID, "Dec-5") ~ 3,
+  )) %>%
+  group_by(measurement) %>%
+  summarise(virus = virus, measurement = measurement, geo_mean = geo_mean(titer), conversion_factor = 2000 / geo_mean) %>%
+    distinct()
+
+convf_df = bind_rows(a_conv_df, b_conv_df)
+```
+
+JR - sensitivity analysis
+
+```{r}
+library(tidyverse)
+library(scales)
+
+# rm(list=ls())
+
+runs <- c("RSV/expansions and titer/working stock titers/2023-Apr-04 (neut & RSV A2 working stock titrat)/neut",
+          "RSV/2023-Apr-10 (neut)", 
+          "RSV/2023-Apr-17 (nuet)", 
+          "RSV/2023-Apr-24 (Neut)",
+          "RSV/2023-Apr-25 (neut)", 
+          "RSV/2023-May-01 (neut)", 
+          "RSV/2023-May-03 (neut)",
+          "RSV/2023-May-09 (neut)", 
+          "RSV/2023-May-15 (neut-cursed)", 
+          "RSV/2023-May-16 (neut)",
+          "RSV/2023-May-22 (neut)", 
+          "Cascadia/runs/2023-May-23 EP (neut)/dr4pl analysis/")
+
+dat <- tibble(path = runs) %>%
+  mutate(
+    file = map(path, ~list.files(.x, pattern = "\\d\\d\\d\\d.+\\.csv"))
+  ) %>%
+  unnest(file) %>%
+  filter(
+    !str_detect(file, "Results")
+  ) %>%
+  mutate(
+    data = map(file.path(path, file), read_csv)
+  ) %>%
+  unnest(data)
+    
+
+dat <- dat %>%
+  mutate(
+    run_date = str_extract(plateID, "\\d\\d\\d\\d-...-\\d\\d"),
+    .after = plateID
+  )
+
+#filter out excluded runs
+
+dat_filter <- dat %>%
+  group_by(plateID) %>%
+  mutate(VOC_avg = mean(foci_num[type=="VOC"], na.rm = TRUE)) %>%
+  mutate(neg_avg = mean(foci_num[type=="negative"], na.rm = TRUE)) %>%
+  group_by(plateID, sample_num) %>%
+  mutate(foci_red = 1-(foci_num/VOC_avg)) %>%
+  
+  #(2 - 6) 2023-Apr-04 plate 1,2, run used row format
+  filter(!(run_date == "2023-Apr-04" & str_detect(plateID, "plate1|plate2"))) %>%
+  
+  #(1 - 6) 2023-Apr-10 plate 2, run used row format
+  filter(!(run_date == "2023-Apr-10" & str_detect(plateID, "plate2"))) %>%
+  
+  #excluded - stock comparisons and pipet var.
+  #(1 - 24) 2023-May-16 plate 1 old RSV A2
+  #(1 - 24) 2023-May-16 plate 2 new RSV A2 working stock test dil #1
+  #(1 - 24) 2023-May-16 plate 3 new RSV A2 working stock test dil #2
+  #(1 - 24) 2023-May-16 plate 4 old RSV A2 working stock pipet variation
+  filter(!(run_date == "2023-May-16" & str_detect(plateID, "plate1|plate2|plate3|plate4"))) %>%
+  
+  #(1 - 24) 2023-May-22 plate 1 high/low/neg control check - low foci counts
+  #(1 - 24) 2023-May-22 plate 2 pipet variation - low foci counts
+  filter(!(run_date == "2023-May-22" & str_detect(plateID, "plate1|plate2"))) %>%
+  
+  #(1 - 12) 2023-May-23 plate 5 cascadia run
+  #(1 - 12) 2023-May-23 plate 6 cascadia run
+  filter(!(run_date == "2023-May-23" & str_detect(plateID, "plate5|plate6")))
+
+#temp_voc <- dat_filter %>% filter(type == "VOC") %>% group_by(plateID) %>% summarise(count = n())
+#temp_neg <- dat_filter %>% filter(type == "negative") %>% group_by(plateID) %>% summarise(count = n())
+
+###############included runs:
+
+#12 VOC runs
+#(1 - 12) 2023-Apr-10 plate 1 (NR-4023) BEI controls
+#(1 - 12) 2023-Apr-17 plate 1 BEI controls
+#(6 - 12) 2023-Apr-24 plate 1,2,3,4,5,6 BEI controls and Rubella specimens
+#(5 - 12) 2023-Apr-25 plate 1 (NR-4203),2,3,4,5 BEI controls and lin specimens only
+#(5 - 12) 2023-May-01 plate 1 (NR-4023),2,3,4,5 BEI controls, lin, and rubella specimens only
+#(1 - 12) 2023-May-01 plate 6 (NR-4023) 26 hpi infection test, with NR-4023
+#(5 - 12) 2023-May-03 plate 1 (NR-4023 x 2),2,3,4,5 BEI controls, lin and rubella specimens only
+#(1 - 12) 2023-May-03 plate 6 (NR-4023 x 2) 26 hpi infection test, with NR-4023
+#(1 - 12) 2023-May-09 plate 1 BEI controls
+#(1 - 12) 2023-May-15, plate 1, run was labeled cursed, NIBSC stocks
+#(1 - 12) 2023-May-16 plate 5 NIBSC stocks only, old RSV A2
+#(2 - 12) 2023-May-22 plate 3,4 NIBSC and BEI replicates
+#(2 - 12) 2023-May-23 plate 3, 4 NIBSC BEI controls
+
+#24 VOC runs
+#(1 - 24) 2023-May-23 plate1 high/low/neg control only
+#(1 - 24) 2023-May-23 plate2 high/low/neg control check - duplicate for shah
+
+#48 VOC runs
+#(1 - 48) 2023-May-09 plate 2 negative only & VOC
+
+
+dat_VOC_stat <- dat_filter %>%
+  ungroup %>%
+  filter(type == "VOC") %>%
+  summarise(
+    avg_VOC = mean(VOC_avg),
+    sd_VOC = sd(VOC_avg),
+    min_VOC = min(VOC_avg),
+    max_VOC = max(VOC_avg)
+  )
+
+dat_sum <- dat_filter %>%
+  filter(type == "VOC" | type == "negative" | type == "NR-4023 anti-RSV pooled serum – low") %>%
+  group_by(type, fold_dil) %>%
+  summarise(
+    avg = mean(foci_red),
+    sd = sd(foci_red),
+    count = n()
+  )
+
+LOB_lower <- dat_sum %>%
+  filter(type == "VOC") %>%
+  mutate(LOB = avg + 1.645*sd)
+
+LOB_upper <- dat_sum %>%
+  filter(type == "negative") %>%
+  mutate(LOB = avg - 1.645*sd)
+
+LOD_lower <- dat_sum %>%
+  filter(fold_dil == 24300) %>%
+  mutate(LOD_lower = LOB_lower$LOB + 1.645*sd)
+
+LOD_upper <- dat_sum %>%
+  filter(fold_dil == 300) %>%
+  mutate(LOD_upper = LOB_upper$LOB - 1.645*sd)
+
+
+
+tab_S3 <- tribble(~`Assay parameter`, ~Lower, ~Upper,
+                  "LoB", LOB_lower$LOB, LOB_upper$LOB,
+                  "LoD", LOD_lower$LOD_lower, LOD_upper$LOD_upper) %>%
+  mutate(
+    Lower = percent(Lower, accuracy = 0.1),
+    Upper = percent(Upper, accuracy = 0.1)
+  ) %>%
+  flextable()
+
+tab_S3
+
+tab_S4 <- tribble(~control, ~`Mean (% inhibition)`, ~`Standard deviation`, ~n,
+                  "Virus only control (VOC)", LOB_lower$avg, LOB_lower$sd, LOB_lower$count,
+                  "Media only control", LOB_upper$avg, LOB_upper$sd, LOB_upper$count,
+                  "NR-4023 24,300-fold diluted", LOD_lower$avg, LOD_lower$sd, LOD_lower$count,
+                  "NR-4023 300-fold diluted", LOD_upper$avg, LOD_upper$sd, LOD_upper$count) %>%
+  mutate(
+    `Mean (% inhibition)` = percent(`Mean (% inhibition)`, accuracy = 0.1),
+    `Standard deviation`= percent(`Standard deviation`, accuracy = 0.1)
+  ) %>%
+  flextable()
+
+tab_S4
+
+rm(LOB_lower, LOB_upper, LOD_lower, LOD_upper, runs, dat, dat_filter,
+   dat_VOC_stat, dat_sum)
+
+
+```
+
+# table S5
+```{r}
+tab_s5_df = read_excel("paper_audit.xlsx", sheet = "Table S5")
+
+tab_s5_df = tab_s5_df %>%
+  mutate(
+    dil_factor = case_when(
+      `sample ID` == "lin #2" ~ 8,
+      `sample ID` == "lin #3" ~ 32,
+      `sample ID` == "lin #4" ~ 128,
+      `sample ID` == "lin #5" ~ 512), 
+    pre_dilution = paste0("1:", dil_factor),
+    IU = 0.37 * ND50
+  ) %>% 
+  group_by(`sample ID`) %>%
+  summarise(
+    n = n(),
+    measured_IU = mean(IU), 
+    IU_predil = measured_IU * dil_factor,
+    pre_dilution = pre_dilution,
+    ratio_expected = round(IU_predil / (29663 * 0.37), 2),
+    IU_predil = round(IU_predil, 0),
+    measured_IU = round(measured_IU, 0)
+  ) %>% ungroup() %>% distinct()
+
+tab_s5 = tab_s5_df %>%
+  select(pre_dilution, n, measured_IU, IU_predil, ratio_expected) %>%
+  flextable() %>%
+  align(part = "all", align = "center")
+  
+
+tab_s5
+```
+# table 1
+```{r}
+library(flextable)
+
+tab_1_df = read_excel("paper_audit.xlsx", sheet = "Table 1")
+tab_1_sum = tab_1_df %>%
+  group_by(`sample ID`) %>%
+  summarise(count = n(), geo_mean = geo_mean(ND50), mean_IU = geo_mean * 0.37, mean_IU_rounded = round(mean_IU, 0)) %>%
+  mutate(reference = round(case_when(
+    `sample ID` == "NR-21973" ~ 6830,
+    `sample ID` == "NR-4020" ~ 1236,
+    `sample ID` == "NR-4021" ~ 4404,
+    `sample ID` == "NR-4022" ~ 706,
+    `sample ID` == "NR-4023" ~ 625,
+  ), 1)) %>%
+  mutate(ratio = round(mean_IU / reference, 1))
+
+tab_1 = tab_1_sum %>%
+  filter(`sample ID` != "NIBSC 16/284") %>%
+  select(c(`sample ID`, count, mean_IU_rounded, reference, ratio)) %>%
+  rename(c(
+    sample = "sample ID", 
+    N = "count",
+    `IU/mL RSV FRNT` = "mean_IU_rounded", 
+    `IU/mL reference` = "reference", 
+     `Ratio of IU/mL\nRSV FRNT/ reference` = "ratio"
+    )) %>%
+  flextable() %>%
+  align(part = "all", align = "center") %>%
+  autofit()
+
+tab_1 %>% save_as_pptx(path = "paper_audit_figs/tab_1.pptx")
+tab_1 
+```
+# table 2
+```{r} 
+tab_2_df = read_excel("paper_audit.xlsx", sheet = "Validation; RSV B") %>%
+  filter(`sample ID` %in% c("NR-21973", "NR-4022")) %>%
+  group_by(`sample ID`) %>%
+  summarise(count = n(), mean = round(mean(ND50 * 0.91), 0), geo_mean = geo_mean(ND50), mean_IU = geo_mean * 0.91, mean_IU_rounded = round(mean_IU, 0)) %>%
+  mutate(reference = round(case_when(
+    `sample ID` == "NR-21973" ~ 12059,
+    `sample ID` == "NR-4022" ~ 1005,
+  ), 1)) %>%
+  mutate(ratio = round(mean_IU / reference, 1))
+
+tab_2 = tab_2_df %>%
+  select(c(`sample ID`, count, mean_IU_rounded, reference, ratio)) %>%
+  rename(c(
+    sample = "sample ID", 
+    N = "count",
+    `IU/mL RSV FRNT` = "mean_IU_rounded",
+    `IU/mL reference` = "reference",
+    `Ratio of IU/mL\nRSV FRNT/ reference` = "ratio"
+  )) %>%
+  flextable() %>%
+  align(part = "all", align = "center") %>%
+  autofit()
+
+tab_2
+```
+# table 3: contrived precision
+
+NOTE ON EXPECTED MEASUREMENT CALCULATIONS:
+expected measurements are calculated by converting the average ND50/ND80 of each panel member to IU/mL. Average values (obtained from the 2023-Apr-10 run) can be found in `RSV assay validation v3.docx`; a copy of which should be in `RSV/Qualification/Qualification report/`. 
+
+Expected measurements can be found on page 8 of the aforementioned document, and are shown below: 
+
+specimen	                    ND50	  ND80    Dilution (cumulative)
+-------------------------------------------------------------------
+NR-21973 anti-RSV ref. serum	29,963	7,652	  neat
+specimen #1	                  14,982	3,826	  2 (2)
+specimen #2	                  3,745	  957	    4 (8)
+specimen #3	                  936	    239	    4 (32)
+specimen #4	                  234	    60	    4 (128)
+specimen #5	                  59	    15	    4 (512)
+specimen #6	                  15	    4	      4 (2048)
+
+
+```{r}
+tab_3_df = read_excel("paper_audit.xlsx", sheet = "Validation; Precision contrived") %>%
+  filter(`sample ID` != "negative control") %>%
+  group_by(`sample ID`) %>%
+  mutate(panel_member = `sample ID`, sid = as.integer(str_split_i(panel_member, "lin #", 2))) %>%
+  ungroup() %>%
+  group_by(panel_member) %>%
+  mutate(
+    n = n(), 
+    ## ND50
+    IU_50 = ND50 * 0.37,
+    logIU_50 = log(IU_50),
+    # `ND50__geomean` = geo_mean(IU_50),
+    ## ND80
+    IU_80 = ND80 * 1.32, 
+    logIU_80 = log(IU_80),
+    # `ND80__geomean` = geo_mean(IU_80),
+    ) %>%
+  ungroup() %>%
+  mutate(day = case_when(
+    str_detect(run_date, "04-25") ~ 1,
+    str_detect(run_date, "05-01") ~ 2,
+    str_detect(run_date, "05-03") ~ 3,
+  )) %>%
+  group_by(day) %>%
+  mutate(plate_num = dense_rank(plateID)) %>%
+  ungroup()
+
+anova_tab_50 = anovaVCA(logIU_50 ~ day,
+                      Data = as.data.frame(tab_3_df),
+                      by = "sample ID",
+                      NegVC = TRUE)
+
+tab_3_anova_50 <- lapply(names(anova_tab_50), function(sample_id) {
+  vca_obj <- anova_tab_50[[sample_id]]
+  tab = as.data.frame(vca_obj[["aov.tab"]])
+  
+  br_v = (tab[["MS"]][2] - tab[["MS"]][3]) / 2
+  wr_v = tab[["MS"]][3]
+  tot_v = br_v + wr_v
+  
+  br_sd = sqrt(br_v)
+  wr_sd = sqrt(wr_v)
+  tot_sd = sqrt(tot_v)
+  
+  br_cv = calculate_GCV(br_sd)
+  wr_cv = calculate_GCV(wr_sd)
+  tot_cv = calculate_GCV(tot_sd)
+  
+  gmeans = tab_3_df %>%
+    group_by(panel_member) %>%
+    reframe(panel_member = panel_member, mean = mean(IU_50), geo_mean = geo_mean(IU_50)) %>%
+    distinct()
+  
+  left_join(data.frame(
+    measurement = "ND50",
+    panel_member = str_split_i(sample_id, "sample ID.", 2),
+    
+    intraassay_GSD = wr_sd,
+    intraassay_GCV = wr_cv,
+    
+    interassay_GSD = br_sd,
+    interassay_GCV = br_cv,
+    
+    total_GSD = tot_sd,
+    total_GCV = tot_cv
+  ) %>% mutate(
+    expected_measurement = case_when(
+      # panel_member == "lin #2" ~ 1386,
+      # panel_member == "lin #3" ~ 346,
+      # panel_member == "lin #4" ~ 87,
+      # panel_member == "lin #5" ~ 22,
+      panel_member == "lin #2" ~ round(29963 / 8 * 0.37, 0),
+      panel_member == "lin #3" ~ round(29963 / 32 * 0.37, 0),
+      panel_member == "lin #4" ~ round(29963 / 128 * 0.37, 0),
+      panel_member == "lin #5" ~ round(29963 / 512 * 0.37, 0)
+    )), gmeans, by = "panel_member")
+})
+
+anova_tab_80 = anovaVCA(logIU_80 ~ day,
+                      Data = as.data.frame(tab_3_df),
+                      by = "sample ID",
+                      NegVC = TRUE)
+
+tab_3_anova_80 <- lapply(names(anova_tab_80), function(sample_id) {
+  vca_obj <- anova_tab_80[[sample_id]]
+  tab = as.data.frame(vca_obj[["aov.tab"]])
+  
+  br_v = (tab[["MS"]][2] - tab[["MS"]][3]) / 2
+  wr_v = tab[["MS"]][3]
+  tot_v = br_v + wr_v
+  
+  br_sd = sqrt(br_v)
+  wr_sd = sqrt(wr_v)
+  tot_sd = sqrt(tot_v)
+  
+  br_cv = calculate_GCV(br_sd)
+  wr_cv = calculate_GCV(wr_sd)
+  tot_cv = calculate_GCV(tot_sd)
+  
+  gmeans = tab_3_df %>%
+    group_by(panel_member) %>%
+    reframe(panel_member = panel_member, mean = mean(IU_80), geo_mean = geo_mean(IU_80)) %>%
+    distinct()
+  
+  left_join(data.frame(
+    measurement = "ND80",
+    panel_member = str_split_i(sample_id, "sample ID.", 2),
+    
+    intraassay_GSD = wr_sd,
+    intraassay_GCV = wr_cv,
+    
+    interassay_GSD = br_sd,
+    interassay_GCV = br_cv,
+    
+    total_GSD = tot_sd,
+    total_GCV = tot_cv
+  ) %>% 
+    mutate(
+    expected_measurement = case_when(
+      # panel_member == "lin #2" ~ 1263,
+      # panel_member == "lin #3" ~ 315,
+      # panel_member == "lin #4" ~ 79,
+      # panel_member == "lin #5" ~ 2,
+      panel_member == "lin #2" ~ round(7652 / 8 * 1.32, 0),
+      panel_member == "lin #3" ~ round(7652 / 32 * 1.32, 0),
+      panel_member == "lin #4" ~ round(7652 / 128 * 1.32, 0),
+      panel_member == "lin #5" ~ round(7652 / 512 * 1.32, 0)
+    )),
+  gmeans, by = "panel_member")
+})
+
+anova_df = bind_rows(tab_3_anova_50, tab_3_anova_80)
+
+
+tab_3_df = left_join(tab_3_df, anova_df, by = "panel_member")
+
+tab_3 = tab_3_df %>%
+  select(
+    measurement, 
+    panel_member, 
+    expected_measurement,
+    n, 
+    # geo_mean,
+    mean,
+    matches(".*_GSD|.*_GCV"), 
+    matches(".*_GSD|.*_GCV")) %>%
+  distinct() %>%
+  rename_with(
+    .cols = matches("intraassay"),
+    .fn = ~str_replace(., "intraassay", "Intra-assay component")
+  ) %>%
+  rename_with(
+    .cols = matches("interassay"),
+    .fn = ~str_replace(., "interassay", "Inter-assay component")
+  ) %>%
+  rename_with(
+    .cols = matches("total"),
+    .fn = ~str_replace(., "total", "Within-lab")
+  ) %>%
+  rename(
+    c(
+      # `Geometric mean (IU/mL)` = geo_mean,
+    ` ` = panel_member, 
+    `  ` = measurement,
+    `Expected measurement` = expected_measurement
+    )
+  ) %>% 
+  rename_with(
+    .cols = matches("GSD"),
+    .fn = ~str_replace(., "GSD", "Geometric SD")
+  ) %>%
+  rename_with(
+    .cols = matches("GCV"),
+    .fn = ~str_replace(., "GCV", "%GCV")
+  ) %>%
+  mutate(across(matches("CV|SD"), ~ replace_na(., 0))) %>%
+  mutate(across(matches("CV"), ~ round(., 1))) %>%
+  mutate(across(matches("SD"), ~ round(ifelse (. == 0, 0, exp(.)), 2))) %>%
+  mutate(across(matches("mean"), ~ round(., 0))) %>%
+  arrange(` `) %>%
+  arrange(`  `) %>%
+  flextable() %>%
+  # span_header(sep = "_", i = 1, j = 2:8) %>%
+  span_header(sep = "_") %>%
+  vline(j = c(1, 2, 3, 4, 5, 7, 9)) %>%
+  hline(part = "header", i = 1, j = 6:10) %>%
+  hline(i = 4) %>%
+  merge_h(part = "header", i = 1) %>%
+  merge_v(j = 1) %>%
+  align(part = "all", align = "center")
+
+tab_3
+```
+
+# table 4 - rubella precision
+```{r}
+tab_4_df = read_excel("paper_audit.xlsx", sheet = "Validation; Precision rubella") %>%
+  mutate(panel_member = `sample ID`) %>%
+  group_by(panel_member) %>%
+  mutate(
+    n = n(), 
+    ## ND50
+    IU_50 = ND50 * 0.37,
+    # IU_50 = ND50 * 0.370027752081406,
+    logIU_50 = log(IU_50),
+    ## ND80
+    IU_80 = ND80 * 1.32,
+    # IU_80 = ND80 * 1.32013201320132,
+    logIU_80 = log(IU_80),
+    # ND80_geomean = geo_mean(IU_80),
+    ) %>%
+  ungroup() %>%
+  mutate(day = case_when(
+    str_detect(plateID, "2023-May-01") ~ 2,
+    str_detect(plateID, "2023-May-03") ~ 3
+  ))
+
+anova_tab_50 <- anovaVCA(logIU_50 ~ day,
+                      Data = as.data.frame(tab_4_df),
+                      by = "sample ID",
+                      NegVC = TRUE)
+
+
+tab_4_anova_50 <- lapply(names(anova_tab_50), function(sample_id) {
+  vca_obj <- anova_tab_50[[sample_id]]
+  tab = as.data.frame(vca_obj[["aov.tab"]])
+  
+  br_v = (tab[["MS"]][2] - tab[["MS"]][3]) / 2
+  wr_v = tab[["MS"]][3]
+  tot_v = br_v + wr_v
+  
+  br_sd = sqrt(br_v)
+  wr_sd = sqrt(wr_v)
+  tot_sd = sqrt(tot_v)
+  
+  br_cv = calculate_GCV(br_sd)
+  wr_cv = calculate_GCV(wr_sd)
+  tot_cv = calculate_GCV(tot_sd)
+  
+  gmeans = tab_4_df %>%
+    group_by(panel_member) %>%
+    reframe(panel_member = panel_member, ND50_geo_mean = geo_mean(IU_50)) %>%
+    distinct()
+  
+  left_join(data.frame(
+    measurement = "ND50",
+    panel_member = str_split_i(sample_id, "sample ID.", 2),
+      
+    ND50_intraassay_GSD = wr_sd,
+    ND50_intraassay_GCV = wr_cv,
+    
+    ND50_interassay_GSD = br_sd,
+    ND50_interassay_GCV = br_cv,
+    
+    ND50_total_GSD = tot_sd,
+    ND50_total_GCV = tot_cv
+  ), gmeans, by = "panel_member")
+})
+
+anova_tab_80 <- anovaVCA(logIU_80 ~ day,
+                      Data = as.data.frame(tab_4_df),
+                      by = "sample ID",
+                      NegVC = TRUE)
+
+tab_4_anova_80 <- lapply(names(anova_tab_80), function(sample_id) {
+  vca_obj <- anova_tab_80[[sample_id]]
+  tab = as.data.frame(vca_obj[["aov.tab"]])
+  
+  br_v = (tab[["MS"]][2] - tab[["MS"]][3]) / 2
+  wr_v = tab[["MS"]][3]
+  tot_v = br_v + wr_v
+  
+  br_sd = sqrt(br_v)
+  wr_sd = sqrt(wr_v)
+  tot_sd = sqrt(tot_v)
+  
+  br_cv = calculate_GCV(br_sd)
+  wr_cv = calculate_GCV(wr_sd)
+  tot_cv = calculate_GCV(tot_sd)
+  
+  gmeans = tab_4_df %>%
+    group_by(panel_member) %>%
+    reframe(panel_member = panel_member, ND80_geo_mean = geo_mean(IU_80)) %>%
+    distinct()
+  
+  left_join(data.frame(
+    measurement = "ND80",
+    panel_member = str_split_i(sample_id, "sample ID.", 2),
+    
+    ND80_intraassay_GSD = wr_sd,
+    ND80_intraassay_GCV = wr_cv,
+    
+    ND80_interassay_GSD = br_sd,
+    ND80_interassay_GCV = br_cv,
+    
+    ND80_total_GSD = tot_sd,
+    ND80_total_GCV = tot_cv
+  ) %>% mutate(
+    expected_measurement = case_when(
+      panel_member == "R-01" ~ 1379.5 * 0.37,
+      panel_member == "R-02" ~ 396.8 * 0.37,
+      panel_member == "R-08" ~ 2265.4 * 0.37,
+      panel_member == "R-12" ~ 3219.4 * 0.37,
+      panel_member == "R-14" ~ 3696.4 * 0.37,
+    )), gmeans, by = "panel_member")
+})
+
+# anova_df = bind_rows(tab_4_anova_50, tab_4_anova_80)
+tab_4_df = left_join(tab_4_df, bind_rows(tab_4_anova_50), by = "panel_member")
+tab_4_df = left_join(tab_4_df, bind_rows(tab_4_anova_80), by = "panel_member")
+
+tab_4 = tab_4_df %>%
+  select(panel_member, n, ND50_geo_mean, ND50_total_GSD, ND50_total_GCV, ND80_geo_mean, ND80_total_GSD, ND80_total_GCV) %>%
+  # mutate(expected_measurement = round(expected_measurement, 0)) %>%
+  mutate(across(matches("CV"), ~ round(., 1))) %>%
+  mutate(across(matches("SD"), ~ round(exp(.), 2))) %>%
+  mutate(across(matches("mean"), ~ round(., 0))) %>%
+  distinct() %>%
+  arrange(panel_member) %>%
+  rename(
+    ` ` = panel_member
+  ) %>% 
+  rename_with(
+    .cols = matches("geo_mean"), 
+    .fn = ~str_replace(., "geo_mean", "Geometric mean")
+  ) %>%
+  rename_with(
+    .cols = matches("GSD"),
+    .fn = ~str_replace(., "_.*GSD", "_Geometric SD")
+  ) %>%
+  rename_with(
+    .cols = matches("GCV"),
+    .fn = ~str_replace(., "_.*GCV", "_%GCV (within lab)")
+  ) %>%
+  rename_with(
+    .cols = matches("ND50"),
+    .fn = ~str_replace(., "ND50", "IU/mL from ND50")
+  ) %>%
+  rename_with(
+    .cols = matches("ND80"),
+    .fn = ~str_replace(., "ND80", "IU/mL from ND80")
+  ) %>%
+  # rename(
+    # `Expected measurement` = expected_measurement
+  # ) %>%
+  flextable() %>%
+  span_header(sep = "_") %>%
+  vline(part = "all", j = c(1, 2, 5, 8)) %>%
+  # vline(part = "all", j = c(1, 2, 3, 6, 9)) %>%
+  # hline(part = "header", i = 1, j = 3:8, border = fp_border_default(width = 2)) %>% 
+  # vline(part = "all", j = 8) %>%
+  merge_h(i = 1, part = "header") %>%
+  # merge_v(j = 3:8) %>%
+  align(part = "all", align = "center")
+
+tab_4
+```
+
+# table 5 - RSV B precision
+```{r}
+tab_5_df = read_excel("paper_audit.xlsx", sheet = "Validation; RSV B") %>%
+  filter(`sample ID` != "negative control") %>%
+  mutate(panel_member = `sample ID`) %>%
+  group_by(panel_member) %>%
+  mutate(
+    n = n(), 
+    ## ND50
+    IU_50 = ND50 * 0.91,
+    # IU_50 = ND50 * 0.910875297,
+    logIU_50 = log(IU_50),
+    ) %>%
+  mutate(expected_50 = case_when(
+    panel_member == "2" ~ 1386,
+    panel_member == "3" ~ 346,
+    panel_member == "4" ~ 87,
+    panel_member == "5" ~ 22
+  )) %>%
+  mutate(expected_80 = case_when(
+    panel_member == "2" ~ 1263,
+    panel_member == "3" ~ 315,
+    panel_member == "4" ~ 79,
+    panel_member == "5" ~ 20
+  )) %>%
+  mutate(day = case_when(
+    str_detect(run_date, "2023-12-04") ~ 1,
+    str_detect(run_date, "2023-12-05") ~ 2,
+    str_detect(run_date, "2023-11-27") ~ 3
+  ))
+
+anova_tab_50 <- anovaVCA(logIU_50 ~ day,
+                      Data = as.data.frame(tab_5_df),
+                      by = "sample ID",
+                      NegVC = TRUE)
+
+tab_5_anova_50 <- lapply(names(anova_tab_50), function(sample_id) {
+  vca_obj <- anova_tab_50[[sample_id]]
+  tab = as.data.frame(vca_obj[["aov.tab"]])
+  
+  br_v = (tab[["MS"]][2] - tab[["MS"]][3]) / 2
+  wr_v = tab[["MS"]][3]
+  tot_v = br_v + wr_v
+  
+  br_sd = sqrt(br_v)
+  wr_sd = sqrt(wr_v)
+  tot_sd = sqrt(tot_v)
+  
+  br_cv = calculate_GCV(br_sd)
+  wr_cv = calculate_GCV(wr_sd)
+  tot_cv = calculate_GCV(tot_sd)
+  
+  gmeans = tab_5_df %>%
+    group_by(panel_member) %>%
+    reframe(panel_member = panel_member, mean = mean(IU_50), geo_mean = geo_mean(IU_50)) %>%
+    distinct()
+  
+  left_join(data.frame(
+    measurement = "ND50",
+    panel_member = str_split_i(sample_id, "sample ID.", 2),
+    
+      
+    intraassay_GSD = wr_sd,
+    intraassay_GCV = wr_cv,
+    
+    interassay_GSD = br_sd,
+    interassay_GCV = br_cv,
+    
+    total_GSD = tot_sd,
+    total_GCV = tot_cv
+  ), gmeans, by = "panel_member")
+})
+
+tab_5_df = left_join(tab_5_df, bind_rows(tab_5_anova_50), by = "panel_member")
+
+tab_5 = tab_5_df %>%
+  select(
+    panel_member, 
+    n, 
+    geo_mean,
+    # mean,
+    matches(".*_GSD|.*_GCV")
+  ) %>%
+  distinct() %>%
+  rename_with(
+    .cols = matches("intraassay"),
+    .fn = ~str_replace(., "intraassay", "Intra-assay component")
+  ) %>%
+  rename_with(
+    .cols = matches("interassay"),
+    .fn = ~str_replace(., "interassay", "Inter-assay component")
+  ) %>%
+  rename_with(
+    .cols = matches("total"),
+    .fn = ~str_replace(., "total", "Within-lab")
+  ) %>%
+  rename(
+    c(`Geometric mean (IU/mL)` = geo_mean,
+    ` ` = panel_member
+    )
+  ) %>%
+  rename_with(
+    .cols = matches("GSD"),
+    .fn = ~str_replace(., "GSD", "Geometric SD")
+  ) %>%
+  rename_with(
+    .cols = matches("GCV"),
+    .fn = ~str_replace(., "GCV", "%GCV")
+  ) %>%
+  mutate(across(matches("CV|SD"), ~ replace_na(., 0))) %>%
+  mutate(across(matches("CV"), ~ round(., 1))) %>%
+  mutate(across(matches("SD"), ~ round(ifelse (. == 0, 0, exp(.)), 2))) %>%
+  mutate(across(matches("mean"), ~ round(., 0))) %>%
+  distinct() %>%
+  arrange(` `) %>%
+  flextable() %>%
+  span_header(sep = "_") %>% 
+  vline(part = "all", j = c(1, 2, 3, 5, 7)) %>%
+  # hline(part = "header", i = 1, j = 3:8, border = fp_border_default(width = 2)) %>% 
+  # vline(part = "all", j = 8) %>%
+  merge_h(i = 1, part = "header") %>%
+  # merge_v(j = 3:8) %>%
+  align(part = "all", align = "center") %>%
+  autofit()
+
+tab_5
+```
+
+```{r}
+b_df = read_excel("neut analysis EP/B_analysis.xlsx") %>%
+  filter(virus %in% c("B150", "B200"))
+
+
+tab_5_b150 = b_df %>%
+  filter(virus == "B150") %>%
+  filter(!str_detect(sample_base, "negative")) %>%
+  select(sample_base, ND50, virus) %>%
+  group_by(sample_base) %>%
+  summarise(
+    n = n(),
+    geo_mean = round(geo_mean(ND50 * 0.91), 0),
+    geo_mean_unrounded_cf = round(geo_mean(ND50 * 0.910875297), 0),
+    mean = round(mean(ND50 * 0.91), 0),
+    mean_unrounded_cf = round(mean(ND50 * 0.910875297), 0),
+    virus = virus) %>%
+  distinct() %>%
+  ungroup() %>%
+  flextable() %>%
+  align(part = "all", align = "center") %>%
+  add_footer_lines("Using all 6 ND50 values sourced from B150")
+
+tab_5_b150
+
+tab_5_b200 = b_df %>%
+  filter(virus == "B200") %>%
+  filter(!str_detect(sample_base, "negative")) %>%
+  select(sample_base, ND50, virus) %>%
+  group_by(sample_base) %>%
+  summarise(
+    n = n(),
+    geo_mean = round(geo_mean(ND50 * 0.91), 0),
+    geo_mean_unrounded_cf = round(geo_mean(ND50 * 0.910875297), 0),
+    mean = round(mean(ND50 * 0.91), 0),
+    mean_unrounded_cf = round(mean(ND50 * 0.910875297), 0),
+    virus = virus) %>%
+  distinct() %>%
+  ungroup() %>%
+  flextable() %>%
+  align(part = "all", align = "center") %>%
+  add_footer_lines("Using all 6 ND50 values sourced from B200")
+
+tab_5_b200
+
+tab_5_combined = b_df %>%
+  filter(!str_detect(sample_base, "negative")) %>%
+  select(sample_base, ND50, virus) %>%
+  group_by(sample_base) %>%
+  summarise(
+    n = n(),
+    geo_mean = round(geo_mean(ND50 * 0.91), 0),
+    geo_mean_unrounded_cf = round(geo_mean(ND50 * 0.910875297), 0),
+    mean = round(mean(ND50 * 0.91), 0),
+    mean_unrounded_cf = round(mean(ND50 * 0.910875297), 0)
+  ) %>%
+  distinct() %>%
+  ungroup() %>%
+  flextable() %>%
+  align(part = "all", align = "center") %>%
+  add_footer_lines("Using all 12 ND50 values sourced from B150 and B200")
+
+tab_5_combined
+```
+
+## regenerate Table S6
+```{r}
+all_df = read_excel("paper_audit.xlsx", sheet = "Results") %>%
+  filter(paper == "yes")
+
+table_s6 = all_df %>%
+  mutate(group = case_when(
+    sample_type2 == "timepoint" ~ "HSV serology remnant specimens",
+    sample_type2 == "future RSV-infected" ~ "Future RSV PCR+",
+    sample_type2 == "RSV+, immunocompetent" ~ "RSC PCR+ immunocompetent",
+    sample_type2 == "RSV+, immunosuppressed" ~ "RSV PCR+ immunosuppressed",
+    sample_type2 == "Influenza+, RSV-" ~ "Influenza PCR+, RSV PCR-",
+    str_detect(`sample ID`, "^R-") ~ "Rubella serology remnant specimens",
+    .default= "HSV serology remnant specimens"
+  ),
+  `Age group` = case_when(
+    pat_age < 18 ~ "below 18",
+    pat_age >= 18 & pat_age <= 65 ~ "18-65",
+    pat_age > 65 ~ "65+",
+  ),
+  `Immunosuppression (yes/no)` = case_when(
+    sample_type2 == "RSV+, immunocompetent" ~ "N",
+    sample_type2 == "RSV+, immunosuppressed" ~ "Y",
+    .default = "Unknown"
+  ),
+  Individual = ifelse(group == "Rubella serology remnant specimens", `sample ID`, dummy),
+  Sex = PatSex,
+  Age = pat_age,
+  `Hospital source` = performing_lab_locs,
+  `RSV Neutralizing Titer (IU/mL)` = ifelse(group == "Rubella serology remnant specimens", round(`IU/mL RSV A2`, 0), round(ND50 * 0.37, 0)), 
+  `Rubella Neutralizing Titer (IU/mL)` = round(`Rubella IU/mL`, 0),
+  ) %>%
+  select(
+    Individual, 
+    `RSV Neutralizing Titer (IU/mL)`, 
+    `Rubella Neutralizing Titer (IU/mL)`,
+    `Immunosuppression (yes/no)`,
+    `Hospital source`,
+    `Sex`,
+    `Age`,
+    `Age group`,
+    `group`
+  ) %>%
+  distinct() %>%
+  arrange(desc(`RSV Neutralizing Titer (IU/mL)`)) %>%
+  arrange(group)
+
+table_s6 %>%
+  flextable() %>%
+  align(part = "all", align = "center") %>%
+  autofit()
+
+write.xlsx(table_s6, "paper_audit_figs/Table S6_raw.xlsx")
+
+```

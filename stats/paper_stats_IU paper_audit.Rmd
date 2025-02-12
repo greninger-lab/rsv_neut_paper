@@ -1,0 +1,223 @@
+---
+title: "paper_stats"
+author: "EP"
+date: "2024-04-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Figure 1 - ELISA v ND50 spearman correlation test
+## lines 28 and 107
+```{r}
+library(readxl)
+library(timetk)
+library(dr4pl)
+library(tidyverse)
+library(broom)
+library(purrr)
+library(readxl)
+
+elisa_df = read_excel('../paper_audit.xlsx', sheet = 'Validation; ELISA')
+e_contrived = elisa_df %>%
+  filter(str_detect(`sample ID`, "lin"))
+
+e_contrived = e_contrived %>%
+  group_by(`sample ID`) %>%
+  summarise(iu = mean(ND50 * 0.37), co_norm = mean(co_norm)) %>%
+  ungroup() %>% distinct()
+
+
+elisa_v_nd50 = cor.test(e_contrived$iu, e_contrived$co_norm, method = 'spearman', alternative = "greater") ## line 38, 127, rho = 1, p = 0.0014
+
+
+print(elisa_v_nd50)
+```
+
+## Figures 2-3 (timepoints and hospital groups)
+```{r}
+geo_mean <- function(x) {
+  return (exp(mean(log(x))))
+}
+raw = read_excel('../paper_audit.xlsx')
+raw = raw %>% 
+  mutate(iu = ND50 * 0.37)
+
+raw$logIU = log2(raw$iu)
+
+# input logIU col
+get_gmt_ratio = function(df1, df2) {
+  
+  geo1 = geo_mean(df1$iu)
+  geo2 = geo_mean(df2$iu)
+
+  return (geo1 / geo2)
+}
+
+# define groups 
+rp_ic = raw %>%
+  filter(sample_type2 == 'RSV+, immunocompetent')
+
+rp_is = raw %>%
+  filter(sample_type2 == 'RSV+, immunosuppressed')
+
+future_pos = raw %>%
+  filter(sample_type2 == 'future RSV-infected')
+
+flu = raw %>%
+  filter(sample_type2 == 'Influenza+, RSV-')
+
+timepoints = raw %>%
+  filter(sample_type2 == 'population')
+
+#### P-VALUES #########################################################
+
+## future positives vs population
+fp_vs_pop = t.test(future_pos$logIU, timepoints$logIU)  
+
+timepoints_vs_competent = tidy(t.test(timepoints$logIU, rp_ic$logIU)) 
+timepoints_vs_competent["group"] <-'timepoints vs immunocompetent'
+
+timepoints_vs_suppressed = tidy(t.test(timepoints$logIU, rp_is$logIU)) 
+timepoints_vs_suppressed["group"] <- "pop vs immunusuppressed"
+
+timepoints_vs_flu = tidy(t.test(timepoints$logIU, flu$logIU)) 
+timepoints_vs_flu["group"] <- "timepoints vs flu"
+
+future_vs_suppressed = tidy(t.test(future_pos$logIU, rp_is$logIU)) 
+future_vs_suppressed["group"] <- "future positive vs immunosuppressed"
+
+future_vs_competent = tidy(t.test(future_pos$logIU, rp_ic$logIU)) 
+future_vs_competent["group"] <- 'future vs immunocompetent'
+
+flu_vs_competent = tidy(t.test(flu$logIU, rp_ic$logIU)) 
+flu_vs_competent["group"] <- "flu vs immunocompetent"
+
+suppressed_vs_competent = tidy(t.test(rp_ic$logIU, rp_is$logIU))  
+suppressed_vs_competent["group"] <- "immunocompetent vs immunusuppressed"
+
+
+########################## TIMEPOINTS ##################################
+
+tp1 = timepoints %>%
+  filter(CollDate < '2022/09/1')
+tp1$timepoint <- "timepoint1"
+
+tp2 = timepoints %>%
+  filter_by_time(CollDate, '2022/07/01', '2023/02/01')
+tp2$timepoint <- "timepoint2"
+
+tp3 = timepoints %>%
+  filter_by_time(CollDate, '2023/02/01', '2023/07/01')
+tp3$timepoint <- "timepoint3"
+
+tp4 = timepoints %>%
+  filter(CollDate > '2023/07/01')
+tp4$timepoint <- "timepoint4"
+
+## make all_timepoints just for anova
+all_timepoints = rbind(tp1, tp2, tp3, tp4)
+timepoint_comparison = aov(logIU ~ timepoint, data = all_timepoints) 
+
+## pre_outbreak vs post_outbreak
+pre_outbreak = timepoints %>%
+  filter(CollDate < '2022/09/01')
+
+post_outbreak = timepoints %>%
+  filter(CollDate > '2022/09/01')
+
+pre_v_post = wilcox.test(pre_outbreak$logIU, post_outbreak$logIU, alternative = 'two.sided') 
+```
+
+#### flu+ vs immunocompetent
+###### lines 29-30, 202-203
+```{r}
+print(flu_vs_competent$p.value)
+print(get_gmt_ratio(rp_ic, flu))
+```
+
+# Figure 2-3 p-values
+
+#### comparing all timepoints from pop (one-way anova)
+###### line 189
+
+```{r}
+summary(timepoint_comparison)
+```
+
+#### comparing population samples from before (Sep 1, 2022) and after RSV outbreak
+###### lines 33, 191
+```{r}
+pre_v_post$p.value
+```
+
+### future positives vs timepoints 
+###### line 196
+
+```{r}
+fp_vs_pop$p.value
+```
+
+#### population vs immunocompetent
+###### lines 203-204
+```{r}
+print(timepoints_vs_competent$p.value)
+print(get_gmt_ratio(rp_ic, timepoints))
+```
+#### population vs immunosuppressed
+###### lines 204-205
+
+```{r}
+print(timepoints_vs_suppressed$p.value)
+print(get_gmt_ratio(timepoints, rp_is))
+```
+#### population vs flu
+###### line 205-206
+```{r}
+print(timepoints_vs_flu$p.value)
+print(get_gmt_ratio(timepoints, flu))
+```
+#### future positives vs immunocompetent
+###### lines 206-207
+```{r}
+print(future_vs_competent$p.value)
+print(get_gmt_ratio(rp_ic, future_pos))
+```
+
+#### future positives vs immunosuppressed
+###### lines 207-208
+```{r}
+print(future_vs_suppressed$p.value)
+print(get_gmt_ratio(future_pos, rp_is))
+```
+
+#### immunocompetent vs immunosuppressed
+###### line 208-209
+```{r}
+print(suppressed_vs_competent$p.value)
+print(get_gmt_ratio(rp_ic, rp_is))
+```
+#### flu+ vs immunocompetent
+###### lines 209-210
+note: I repeated this code above because the p-value and ratio were mentioned in the abstract. 
+```{r}
+print(flu_vs_competent$p.value)
+print(get_gmt_ratio(rp_ic, flu))
+```
+
+# GMT trends between hospitals
+## line 282
+```{r}
+############################################################################
+hos_a = rp_ic %>% filter(str_detect(performing_lab_locs, "Hospital A"))
+hos_b = rp_ic %>% filter(str_detect(performing_lab_locs, "Hospital B"))
+hos_c = rp_ic %>% filter(str_detect(performing_lab_locs, "Hospital C"))
+############################################################################
+print(get_gmt_ratio(hos_a, hos_b))
+print(get_gmt_ratio(hos_a, hos_c))
+
+print(t.test(hos_a$logIU, hos_b$logIU))
+print(t.test(hos_a$logIU, hos_c$logIU))
+
+```
