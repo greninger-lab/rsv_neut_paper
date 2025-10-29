@@ -1571,7 +1571,7 @@ tab_1
 tab_2_df = read_excel("paper_audit.xlsx", sheet = "Validation; RSV B") %>%
   filter(`sample ID` %in% c("NR-21973", "NR-4022")) %>%
   group_by(`sample ID`) %>%
-  summarise(count = n(), mean = round(mean(ND50 * 0.91), 0), geo_mean = geo_mean(ND50), mean_IU = geo_mean * 0.91, mean_IU_rounded = round(mean_IU, 0)) %>%
+  summarise(count = n(), mean = round(mean(ND50 * 0.94), 0), geo_mean = geo_mean(ND50), mean_IU = geo_mean * 0.94, mean_IU_rounded = round(mean_IU, 0)) %>%
   mutate(reference = round(case_when(
     `sample ID` == "NR-21973" ~ 12059,
     `sample ID` == "NR-4022" ~ 1005,
@@ -1979,7 +1979,7 @@ tab_5_df = read_excel("paper_audit.xlsx", sheet = "Validation; RSV B") %>%
   mutate(
     n = n(), 
     ## ND50
-    IU_50 = ND50 * 0.91,
+    IU_50 = ND50 * 0.94,
     # IU_50 = ND50 * 0.910875297,
     logIU_50 = log(IU_50),
     ) %>%
@@ -2110,10 +2110,10 @@ tab_5_b150 = b_df %>%
   group_by(sample_base) %>%
   summarise(
     n = n(),
-    geo_mean = round(geo_mean(ND50 * 0.91), 0),
-    geo_mean_unrounded_cf = round(geo_mean(ND50 * 0.910875297), 0),
-    mean = round(mean(ND50 * 0.91), 0),
-    mean_unrounded_cf = round(mean(ND50 * 0.910875297), 0),
+    geo_mean = round(geo_mean(ND50 * 0.94), 0),
+    geo_mean_unrounded_cf = round(geo_mean(ND50 * 0.94), 0),
+    mean = round(mean(ND50 * 0.94), 0),
+    mean_unrounded_cf = round(mean(ND50 * 0.94), 0),
     virus = virus) %>%
   distinct() %>%
   ungroup() %>%
@@ -2130,10 +2130,10 @@ tab_5_b200 = b_df %>%
   group_by(sample_base) %>%
   summarise(
     n = n(),
-    geo_mean = round(geo_mean(ND50 * 0.91), 0),
-    geo_mean_unrounded_cf = round(geo_mean(ND50 * 0.910875297), 0),
-    mean = round(mean(ND50 * 0.91), 0),
-    mean_unrounded_cf = round(mean(ND50 * 0.910875297), 0),
+    geo_mean = round(geo_mean(ND50 * 0.94), 0),
+    geo_mean_unrounded_cf = round(geo_mean(ND50 * 0.94), 0),
+    mean = round(mean(ND50 * 0.94), 0),
+    mean_unrounded_cf = round(mean(ND50 * 0.94), 0),
     virus = virus) %>%
   distinct() %>%
   ungroup() %>%
@@ -2149,10 +2149,10 @@ tab_5_combined = b_df %>%
   group_by(sample_base) %>%
   summarise(
     n = n(),
-    geo_mean = round(geo_mean(ND50 * 0.91), 0),
-    geo_mean_unrounded_cf = round(geo_mean(ND50 * 0.910875297), 0),
-    mean = round(mean(ND50 * 0.91), 0),
-    mean_unrounded_cf = round(mean(ND50 * 0.910875297), 0)
+    geo_mean = round(geo_mean(ND50 * 0.94), 0),
+    geo_mean_unrounded_cf = round(geo_mean(ND50 * 0.94), 0),
+    mean = round(mean(ND50 * 0.94), 0),
+    mean_unrounded_cf = round(mean(ND50 * 0.94), 0)
   ) %>%
   distinct() %>%
   ungroup() %>%
